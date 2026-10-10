@@ -1,0 +1,18 @@
+{
+  "name": "vending-verify-mock",
+  "version": "1.0.0",
+  "description": "Mock server for a vending machine's QR pickup-code verify call. Logs every request and replies with a response you can change live.",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^5.3.0"
+  }
+}

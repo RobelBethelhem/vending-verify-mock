@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Vending Mock Admin</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #fff; --text: #1d2330; --muted: #6b7280; --line: #dde1e7;
+    --ok: #16a34a; --bad: #dc2626; --accent: #2563eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111418; --card: #1b2027; --text: #e6e9ee; --muted: #9aa3af; --line: #2c333d; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 12px 16px 60px; }
+  h1 { font-size: 18px; margin: 4px 0 12px; }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px; margin-bottom: 14px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 3px; }
+  input, select, textarea { width: 100%; font: inherit; color: inherit; background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+  textarea { font-family: ui-monospace, Consolas, monospace; font-size: 13px; min-height: 90px; }
+  button { font: inherit; border: 0; border-radius: 8px; padding: 9px 14px; cursor: pointer;
+    background: var(--accent); color: #fff; }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .row > * { flex: 1 1 120px; }
+  .muted { color: var(--muted); font-size: 12px; }
+
+  /* Big mode toggle */
+  .toggle { display: flex; gap: 10px; }
+  .toggle button { flex: 1; padding: 22px 0; font-size: 22px; font-weight: 700;
+    background: var(--bg); color: var(--muted); border: 2px solid var(--line); }
+  .toggle button.on.success { background: var(--ok); color: #fff; border-color: var(--ok); }
+  .toggle button.on.fail { background: var(--bad); color: #fff; border-color: var(--bad); }
+
+  .tabs { display: flex; gap: 6px; margin-bottom: 6px; }
+  .tabs button { flex: 1; }
+  .tabs button:not(.active) { background: transparent; color: var(--text); border: 1px solid var(--line); }
+
+  /* Logs */
+  .log { border-top: 1px solid var(--line); padding: 9px 0; }
+  .log-head { cursor: pointer; display: grid; grid-template-columns: auto 1fr auto; gap: 4px 8px; align-items: center; }
+  .badge { font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 6px; color: #fff; }
+  .badge.success { background: var(--ok); } .badge.fail { background: var(--bad); }
+  .path { font-family: ui-monospace, Consolas, monospace; font-size: 13px; overflow-wrap: anywhere; }
+  .meta { grid-column: 1 / -1; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+  .meta b { color: var(--text); font-weight: 600; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px; font-size: 12px; margin: 4px 0 8px; max-height: 320px; overflow: auto; }
+  .detail h3 { font-size: 12px; color: var(--muted); margin: 8px 0 0; }
+  #toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); background: #111; color: #fff;
+    padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #toast.show { opacity: .92; }
+  #login { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Vending verify mock</h1>
+
+  <!-- Shown only when no token is stored -->
+  <section class="card" id="login">
+    <h2>Admin token</h2>
+    <p class="muted">Paste the ADMIN_TOKEN (printed in the server console if you did not set one).</p>
+    <div class="row"><input id="tokenInput" type="password" autocomplete="off"><button id="tokenSave">Use token</button></div>
+  </section>
+
+  <div id="app" hidden>
+    <!-- Mode toggle -->
+    <section class="card">
+      <div class="toggle">
+        <button id="btnSuccess" class="success">SUCCESS</button>
+        <button id="btnFail" class="fail">FAIL</button>
+      </div>
+      <p class="muted" id="modeText" style="margin:8px 0 0"></p>
+    </section>
+
+    <!-- Response editors -->
+    <section class="card">
+      <h2>Responses</h2>
+      <label for="preset">Preset (fills both editors, then press Save)</label>
+      <select id="preset"></select>
+
+      <div class="tabs" style="margin-top:10px">
+        <button id="tabSuccess" class="active">Success response</button>
+        <button id="tabFail">Fail response</button>
+      </div>
+
+      <div id="editors"></div>
+
+      <div class="row">
+        <div><label for="delayMs">Delay before reply (ms)</label><input id="delayMs" type="number" min="0" step="100"></div>
+        <div><label for="failCodes">Fail codes (comma separated)</label><input id="failCodes" placeholder="FAIL001, BAD123"></div>
+      </div>
+      <p class="muted">Scanning a fail code always gets the fail response. Placeholders: {{scanned}} {{slot}} {{machine}}
+        {{timestamp}} {{timestampMs}} {{iso}} {{method}} {{path}} {{query.KEY}} {{body.KEY}}</p>
+      <div class="row"><button id="save">Save</button><button class="ghost" id="reload">Reload from server</button></div>
+    </section>
+
+    <!-- Self test -->
+    <section class="card">
+      <h2>Test (simulate a machine call)</h2>
+      <div class="row">
+        <div style="flex:0 1 110px"><label for="tMethod">Method</label>
+          <select id="tMethod"><option>POST</option><option>GET</option><option>PUT</option></select></div>
+        <div style="flex:3 1 200px"><label for="tPath">Path + query</label><input id="tPath" value="/WXdevelop/VerifyCode"></div>
+      </div>
+      <label for="tType">Content-Type</label>
+      <select id="tType">
+        <option>application/json</option>
+        <option>application/x-www-form-urlencoded</option>
+        <option>text/plain</option>
+      </select>
+      <label for="tBody">Body</label>
+      <textarea id="tBody">{"code":"ABC123","slotNo":"5","deviceId":"VM001"}</textarea>
+      <div class="row" style="margin-top:8px"><button id="tRun">Send test</button></div>
+      <pre id="tOut" hidden></pre>
+    </section>
+
+    <!-- Logs -->
+    <section class="card">
+      <div class="row" style="align-items:center">
+        <h2 style="margin:0">Requests <span class="muted" id="logCount"></span></h2>
+        <button class="ghost" id="copyLast">Copy last request</button>
+        <button class="ghost" id="clearLogs">Clear logs</button>
+      </div>
+      <p class="muted" id="pollStatus"></p>
+      <div id="logs"></div>
+    </section>
+  </div>
+</main>
+<div id="toast"></div>
+
+<script>
+'use strict';
+// ---------------------------------------------------------------------------
+// Token: ?token=... on first visit is saved to localStorage and removed from URL
+// ---------------------------------------------------------------------------
+const $ = (id) => document.getElementById(id);
+function storageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+function storageSet(k, v) { try { localStorage.setItem(k, v); } catch { /* private mode */ } }
+function storageDel(k) { try { localStorage.removeItem(k); } catch {} }
+
+let token = '';
+(function initToken() {
+  const url = new URL(location.href);
+  const fromUrl = url.searchParams.get('token');
+  if (fromUrl) {
+    token = fromUrl;
+    storageSet('adminToken', fromUrl);
+    url.searchParams.delete('token');
+    history.replaceState(null, '', url.pathname + url.search);
+  } else {
+    token = storageGet('adminToken') || '';
+  }
+})();
+
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => t.classList.remove('show'), 1800);
+}
+
+/** fetch wrapper for the admin API (adds the token, handles 401). */
+async function api(method, path, body) {
+  const res = await fetch('/api' + path, {
+    method,
+    headers: { 'x-admin-token': token, 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (res.status === 401) { showLogin('Token rejected. Enter it again.'); throw new Error('unauthorized'); }
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function showLogin(msg) {
+  storageDel('adminToken');
+  $('app').hidden = true;
+  $('login').style.display = 'block';
+  if (msg) toast(msg);
+}
+
+$('tokenSave').onclick = () => {
+  token = $('tokenInput').value.trim();
+  if (!token) return;
+  storageSet('adminToken', token);
+  $('login').style.display = 'none';
+  boot();
+};
+
+// ---------------------------------------------------------------------------
+// Presets (each has a success and a fail variant)
+// ---------------------------------------------------------------------------
+const J = 'application/json', T = 'text/plain', X = 'application/xml';
+const GENERIC_OK = '{"code":0,"status":1,"success":true,"result":"success","ret":0,"errcode":0,"errno":0,"error":0,"msg":"success","message":"success","errmsg":"ok","data":{"code":"{{scanned}}","slotNo":"{{slot}}","num":1,"orderNo":"{{scanned}}"}}';
+const GENERIC_FAIL = '{"code":1,"status":0,"success":false,"result":"fail","ret":1,"errcode":1,"errno":1,"error":1,"msg":"fail","message":"fail","errmsg":"fail","data":{"code":"{{scanned}}","slotNo":"{{slot}}","num":0,"orderNo":"{{scanned}}"}}';
+const PRESETS = [
+  { name: 'Generic JSON (default)', type: J, ok: GENERIC_OK, fail: GENERIC_FAIL },
+  { name: '{"code":0,"msg":"success"}', type: J, ok: '{"code":0,"msg":"success"}', fail: '{"code":1,"msg":"fail"}' },
+  { name: '{"status":1}', type: J, ok: '{"status":1}', fail: '{"status":0}' },
+  { name: '{"success":true}', type: J, ok: '{"success":true}', fail: '{"success":false}' },
+  { name: 'Plain "success"', type: T, ok: 'success', fail: 'fail' },
+  { name: 'Plain "OK"', type: T, ok: 'OK', fail: 'FAIL' },
+  { name: 'Plain "1"', type: T, ok: '1', fail: '0' },
+  { name: '{"errcode":0,"errmsg":"ok"}', type: J, ok: '{"errcode":0,"errmsg":"ok"}', fail: '{"errcode":1,"errmsg":"fail"}' },
+  { name: 'XML return_code', type: X, ok: '<xml><return_code>SUCCESS</return_code></xml>',
+    fail: '<xml><return_code>FAIL</return_code><return_msg>fail</return_msg></xml>' },
+];
+$('preset').innerHTML = '<option value="">Choose a preset…</option>' +
+  PRESETS.map((p, i) => `<option value="${i}">${esc(p.name)}</option>`).join('');
+$('preset').onchange = (e) => {
+  const p = PRESETS[e.target.value];
+  if (!p) return;
+  for (const [key, body] of [['success', p.ok], ['fail', p.fail]]) {
+    $(key + 'Type').value = p.type;
+    $(key + 'Body').value = body;
+    $(key + 'Status').value = 200;
+  }
+  toast('Preset loaded. Press Save to apply.');
+  e.target.value = '';
+};
+
+// ---------------------------------------------------------------------------
+// Editors
+// ---------------------------------------------------------------------------
+function editorHtml(key) {
+  return `<div id="${key}Editor" ${key === 'fail' ? 'hidden' : ''}>
+    <div class="row">
+      <div style="flex:0 1 100px"><label for="${key}Status">Status</label><input id="${key}Status" type="number" min="100" max="599"></div>
+      <div style="flex:3 1 200px"><label for="${key}Type">Content-Type</label><input id="${key}Type" list="ctypes"></div>
+    </div>
+    <label for="${key}Headers">Extra headers (JSON object)</label>
+    <textarea id="${key}Headers" style="min-height:44px" placeholder='{"X-Foo":"bar"}'></textarea>
+    <label for="${key}Body">Body</label>
+    <textarea id="${key}Body" style="min-height:140px"></textarea>
+  </div>`;
+}
+$('editors').innerHTML = editorHtml('success') + editorHtml('fail') +
+  '<datalist id="ctypes"><option>application/json</option><option>text/plain</option>' +
+  '<option>application/xml</option><option>text/html</option><option>text/xml</option></datalist>';
+
+function showTab(key) {
+  $('successEditor').hidden = key !== 'success';
+  $('failEditor').hidden = key !== 'fail';
+  $('tabSuccess').classList.toggle('active', key === 'success');
+  $('tabFail').classList.toggle('active', key === 'fail');
+}
+$('tabSuccess').onclick = () => showTab('success');
+$('tabFail').onclick = () => showTab('fail');
+
+function fillEditors(cfg) {
+  for (const key of ['success', 'fail']) {
+    const r = cfg[key];
+    $(key + 'Status').value = r.status;
+    $(key + 'Type').value = r.contentType;
+    $(key + 'Headers').value = Object.keys(r.headers || {}).length ? JSON.stringify(r.headers, null, 1) : '';
+    $(key + 'Body').value = r.body;
+  }
+  $('delayMs').value = cfg.delayMs;
+  $('failCodes').value = (cfg.failCodes || []).join(', ');
+  showMode(cfg.mode);
+}
+
+function readEditors() {
+  const out = {
+    delayMs: Number($('delayMs').value) || 0,
+    failCodes: $('failCodes').value.split(/[\s,;]+/).filter(Boolean),
+  };
+  for (const key of ['success', 'fail']) {
+    const h = $(key + 'Headers').value.trim();
+    let headers = {};
+    if (h) {
+      try { headers = JSON.parse(h); } catch { throw new Error(`${key} headers are not valid JSON`); }
+    }
+    out[key] = {
+      status: Number($(key + 'Status').value) || 200,
+      contentType: $(key + 'Type').value.trim(),
+      headers,
+      body: $(key + 'Body').value,
+    };
+  }
+  return out;
+}
+
+$('save').onclick = async () => {
+  try {
+    fillEditors(await api('PUT', '/config', readEditors()));
+    toast('Saved');
+  } catch (e) { toast('Save failed: ' + e.message); }
+};
+$('reload').onclick = async () => {
+  try { fillEditors(await api('GET', '/config')); toast('Reloaded'); } catch (e) { toast(e.message); }
+};
+
+// ---------------------------------------------------------------------------
+// Mode toggle
+// ---------------------------------------------------------------------------
+let currentMode = '';
+function showMode(mode) {
+  currentMode = mode;
+  $('btnSuccess').classList.toggle('on', mode === 'success');
+  $('btnFail').classList.toggle('on', mode === 'fail');
+  $('modeText').textContent = mode === 'success'
+    ? 'Machine gets the SUCCESS response (item should drop).'
+    : 'Machine gets the FAIL response.';
+}
+async function setMode(mode) {
+  try { showMode((await api('POST', '/mode', { mode })).mode); toast('Mode: ' + mode.toUpperCase()); }
+  catch (e) { toast(e.message); }
+}
+$('btnSuccess').onclick = () => setMode('success');
+$('btnFail').onclick = () => setMode('fail');
+
+// ---------------------------------------------------------------------------
+// Self test
+// ---------------------------------------------------------------------------
+$('tType').onchange = () => {
+  const samples = {
+    'application/json': '{"code":"ABC123","slotNo":"5","deviceId":"VM001"}',
+    'application/x-www-form-urlencoded': 'code=ABC123&slotNo=5&deviceId=VM001',
+    'text/plain': 'ABC123',
+  };
+  $('tBody').value = samples[$('tType').value];
+};
+$('tRun').onclick = async () => {
+  try {
+    const r = await api('POST', '/test', {
+      method: $('tMethod').value, path: $('tPath').value, contentType: $('tType').value, body: $('tBody').value,
+    });
+    $('tOut').hidden = false;
+    $('tOut').textContent = r.error ? 'Error: ' + r.error
+      : `HTTP ${r.status}\nContent-Type: ${r.headers['content-type'] || ''}\n\n${r.body}`;
+    pollLogs();
+  } catch (e) { toast(e.message); }
+};
+
+// ---------------------------------------------------------------------------
+// Logs (poll every 2 s, newest first)
+// ---------------------------------------------------------------------------
+let logs = [];       // newest first
+let lastId = 0;
+const openIds = new Set(); // ids of expanded entries
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+const pretty = (v) => (v === null || v === undefined || v === '') ? '(empty)'
+  : typeof v === 'string' ? v : JSON.stringify(v, null, 2);
+
+/** Plain-text version of one log entry, for pasting into a chat. */
+function logToText(l) {
+  const r = l.response || {};
+  return [
+    `=== Request #${l.id} at ${l.time} ===`,
+    `${l.method} ${l.url}`,
+    `Client IP: ${l.ip}`,
+    `Detected: scanned=${l.detected.scanned || '-'} slot=${l.detected.slot || '-'} machine=${l.detected.machine || '-'}`,
+    '', '--- Headers ---', Object.entries(l.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n'),
+    '', '--- Query ---', pretty(Object.keys(l.query || {}).length ? l.query : ''),
+    '', '--- Raw body ---', pretty(l.rawBody),
+    '', `--- Parsed body (${l.bodyType}) ---`, pretty(l.parsedBody),
+    '', `--- Response sent (mode=${r.mode}, reason=${r.reason}, delay=${r.delayMs}ms) ---`,
+    `HTTP ${r.status}`, `Content-Type: ${r.contentType}`,
+    ...Object.entries(r.headers || {}).map(([k, v]) => `${k}: ${v}`),
+    '', r.body,
+  ].join('\n');
+}
+
+function renderLogs() {
+  $('logCount').textContent = `(${logs.length})`;
+  $('logs').innerHTML = logs.length ? logs.map((l) => {
+    const r = l.response || {};
+    const d = l.detected || {};
+    const time = new Date(l.time).toLocaleTimeString();
+    return `<div class="log" data-id="${l.id}">
+      <div class="log-head">
+        <span class="badge ${esc(r.mode)}">${esc(r.status)}</span>
+        <span class="path">${esc(l.method)} ${esc(l.path)}</span>
+        <span class="muted">${esc(time)}</span>
+        <div class="meta">scanned: <b>${esc(d.scanned || '-')}</b> · slot: <b>${esc(d.slot || '-')}</b>
+          ${d.machine ? ' · machine: <b>' + esc(d.machine) + '</b>' : ''} · ${esc(r.mode)}${r.reason === 'failCode' ? ' (fail code)' : ''}</div>
+      </div>
+      ${openIds.has(l.id) ? `<div class="detail">
+        <div class="row" style="margin-top:8px"><button class="ghost" data-copy="${l.id}">Copy as text</button></div>
+        <h3>URL</h3><pre>${esc(l.url)}</pre>
+        <h3>Headers</h3><pre>${esc(pretty(l.headers))}</pre>
+        <h3>Query</h3><pre>${esc(pretty(Object.keys(l.query || {}).length ? l.query : ''))}</pre>
+        <h3>Raw body</h3><pre>${esc(pretty(l.rawBody))}</pre>
+        <h3>Parsed body (${esc(l.bodyType)})</h3><pre>${esc(pretty(l.parsedBody))}</pre>
+        <h3>Response sent</h3><pre>${esc(`HTTP ${r.status}  ${r.contentType}  delay ${r.delayMs}ms\n\n${r.body}`)}</pre>
+      </div>` : ''}
+    </div>`;
+  }).join('') : '<p class="muted">No requests yet. Scan a QR code on the machine.</p>';
+}
+
+$('logs').onclick = (e) => {
+  const copyBtn = e.target.closest('[data-copy]');
+  if (copyBtn) {
+    const l = logs.find((x) => x.id === Number(copyBtn.dataset.copy));
+    if (l) copyText(logToText(l));
+    return;
+  }
+  const head = e.target.closest('.log-head');
+  if (!head) return;
+  const id = Number(head.parentElement.dataset.id);
+  openIds.has(id) ? openIds.delete(id) : openIds.add(id);
+  renderLogs();
+};
+
+async function pollLogs() {
+  try {
+    const data = await api('GET', '/logs?since=' + lastId);
+    if (data.lastId < lastId) { // server restarted or logs cleared elsewhere: reload all
+      lastId = 0; logs = [];
+      return pollLogs();
+    }
+    if (data.logs.length) {
+      logs = data.logs.concat(logs).slice(0, 500);
+      renderLogs();
+    }
+    lastId = data.lastId;
+    if (data.mode !== currentMode) showMode(data.mode);
+    $('pollStatus').textContent = 'Live · updated ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    $('pollStatus').textContent = 'Connection problem: ' + e.message;
+  }
+}
+
+$('clearLogs').onclick = async () => {
+  try { await api('DELETE', '/logs'); logs = []; openIds.clear(); renderLogs(); toast('Logs cleared'); }
+  catch (e) { toast(e.message); }
+};
+$('copyLast').onclick = () => logs[0] ? copyText(logToText(logs[0])) : toast('No requests yet');
+
+/** Copy text; falls back to a hidden textarea where the Clipboard API is unavailable. */
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch {}
+    ta.remove();
+  }
+  toast('Copied');
+}
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+let pollTimer = null;
+async function boot() {
+  if (!token) return showLogin();
+  try {
+    fillEditors(await api('GET', '/config'));
+  } catch { return; }
+  $('app').hidden = false;
+  renderLogs();
+  pollLogs();
+  clearInterval(pollTimer);
+  pollTimer = setInterval(pollLogs, 2000);
+}
+boot();
+</script>
+</body>
+</html>
