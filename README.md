@@ -114,9 +114,15 @@ curl -H "x-admin-token: $TOKEN" -X DELETE "$APP/api/logs"
 ## Notes
 
 - **Free hosts sleep after ~15 minutes without traffic** and the first request then
-  takes 30-60 s, which can make the machine time out. Create a free
+  takes 30-60 s, which can make the machine time out. The server keeps itself awake:
+  on Render it pings its own public `/health` every 10 minutes (uses `RENDER_EXTERNAL_URL`,
+  which Render sets automatically; on other hosts set `KEEP_ALIVE_URL=https://<app>`;
+  `KEEP_ALIVE_MINUTES` changes the interval, `KEEP_ALIVE=off` disables it).
+  As a backup, and to get an email if it goes down, add a free
   [UptimeRobot](https://uptimerobot.com) HTTP monitor on `https://<app>.onrender.com/health`
-  every 5 minutes to keep it awake.
+  every 5 minutes.
+- Render's free plan gives 750 instance-hours per month per workspace, enough for
+  ONE service running 24/7. For guaranteed always-on, use Render's paid Starter plan.
 - The free host's disk is temporary: `config.json` and `logs.ndjson` are lost on
   redeploy/restart. The last 500 logs are also kept in memory.
 - Admin routes need the token; machine routes are public by design.

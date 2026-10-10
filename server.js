@@ -440,6 +440,23 @@ function start(port = PORT) {
   });
 }
 
-if (require.main === module) start();
+/**
+ * Keep-alive: free hosts (Render) put the app to sleep after ~15 min without
+ * incoming traffic. We ping our own PUBLIC URL every few minutes; the ping
+ * goes through the host's proxy, so it counts as traffic and the app stays awake.
+ * Render sets RENDER_EXTERNAL_URL automatically. Set KEEP_ALIVE=off to disable.
+ */
+function startKeepAlive() {
+  const baseUrl = process.env.KEEP_ALIVE_URL || process.env.RENDER_EXTERNAL_URL;
+  if (!baseUrl || process.env.KEEP_ALIVE === 'off') return;
+  const minutes = Number(process.env.KEEP_ALIVE_MINUTES) || 10;
+  const url = baseUrl.replace(/\/+$/, '') + '/health';
+  setInterval(() => {
+    fetch(url).catch((err) => console.log('[keep-alive] ping failed:', err.message));
+  }, minutes * 60 * 1000);
+  console.log(`Keep-alive: pinging ${url} every ${minutes} min`);
+}
+
+if (require.main === module) start().then(startKeepAlive);
 
 module.exports = { app, start, ADMIN_TOKEN };
