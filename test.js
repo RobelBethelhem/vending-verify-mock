@@ -16,14 +16,15 @@ process.env.CONFIG_FILE = path.join(tmp, 'config.json');
 process.env.LOG_FILE = path.join(tmp, 'logs.ndjson');
 process.env.ADMIN_TOKEN = 'test-token';
 
-const { start } = require('./server');
+const net = require('net');
+const { start, classify } = require('./server');
 
 let server;
 let base;
 const ADMIN = { 'x-admin-token': 'test-token', 'content-type': 'application/json' };
 
 test.before(async () => {
-  server = await start(0); // 0 = random free port
+  server = await start(0, { quiet: true }); // 0 = random free port
   base = `http://127.0.0.1:${server.address().port}`;
 });
 test.after(() => {
@@ -73,7 +74,9 @@ test('JSON POST returns success and detects nested values', async () => {
   assert.strictEqual(r.json.success, true);
   assert.strictEqual(r.json.data.code, 'ABC');
   const log = await lastLog();
-  assert.deepStrictEqual(log.detected, { scanned: 'ABC', slot: '7', machine: 'VM9' });
+  assert.strictEqual(log.detected.scanned, 'ABC');
+  assert.strictEqual(log.detected.slot, '7');
+  assert.strictEqual(log.detected.machine, 'VM9');
   assert.strictEqual(log.bodyType, 'json');
 });
 
@@ -154,7 +157,7 @@ test('failCodes force the fail response', async () => {
 
 test('admin API rejects requests without a valid token', async () => {
   for (const [method, p] of [['GET', '/api/logs'], ['DELETE', '/api/logs'], ['GET', '/api/config'],
-    ['PUT', '/api/config'], ['POST', '/api/mode'], ['POST', '/api/test']]) {
+    ['PUT', '/api/config'], ['POST', '/api/mode'], ['POST', '/api/test'], ['GET', '/api/summary'], ['GET', '/api/diag']]) {
     assert.strictEqual((await call(method, p)).status, 401, `${method} ${p}`);
     assert.strictEqual((await call(method, p, { headers: { 'x-admin-token': 'wrong' } })).status, 401);
   }
@@ -173,4 +176,192 @@ test('admin test endpoint simulates a machine call', async () => {
 test('clear logs', async () => {
   assert.strictEqual((await call('DELETE', '/api/logs', { headers: ADMIN })).json.ok, true);
   assert.strictEqual((await call('GET', '/api/logs', { headers: ADMIN })).json.logs.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Diagnostics, classification, orders
+// ---------------------------------------------------------------------------
+const CHROME_UA = 'Mozilla/5.0 (Linux; Android 14; SM-A546E) AppleWebKit/537.36 (KHTML, like Gecko) ' +
+  'SamsungBrowser/30.0 Chrome/143.0.0.0 Mobile Safari/537.36';
+const WEBVIEW_UA = 'Mozilla/5.0 (Linux; Android 6.0; rk3288 Build/MRA58K; wv) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Version/4.0 Chrome/50.0.2661.86 Safari/537.36';
+const BROWSER = { 'user-agent': CHROME_UA, 'accept-language': 'en-US,en', accept: 'text/html,application/xhtml+xml,*/*' };
+const MACHINE = { 'user-agent': 'okhttp/3.12.0' };
+
+test('source classification', async () => {
+  assert.strictEqual(classify('/favicon.ico', {}), 'noise');
+  assert.strictEqual(classify('/robots.txt', { 'user-agent': CHROME_UA }), 'noise');
+  assert.strictEqual(classify('/x', { 'user-agent': 'Googlebot/2.1' }), 'bot');
+  assert.strictEqual(classify('/x', { 'user-agent': 'Claude-User/1.0' }), 'bot');
+  assert.strictEqual(classify('/x', { 'user-agent': CHROME_UA, 'accept-language': 'en' }), 'browser');
+  // Browser-looking UA without Accept-Language, or an Android WebView: machine-like
+  assert.strictEqual(classify('/x', { 'user-agent': CHROME_UA }), 'machine?');
+  assert.strictEqual(classify('/x', { 'user-agent': WEBVIEW_UA, 'accept-language': 'zh-CN' }), 'machine?');
+  assert.strictEqual(classify('/x', MACHINE), 'machine?');
+  assert.strictEqual(classify('/x', { 'user-agent': 'Dalvik/2.1.0 (Linux; U; Android 6.0)' }), 'machine?');
+  assert.strictEqual(classify('/x', {}), 'machine?');
+  // ...and it is stored on the log entry
+  await call('GET', '/WXdevelop/VerifyCode?mid=1', { headers: MACHINE });
+  assert.strictEqual((await lastLog()).source, 'machine?');
+  await call('GET', '/WXdevelop/VerifyCode', { headers: BROWSER });
+  assert.strictEqual((await lastLog()).source, 'browser');
+});
+
+test('noise paths: favicon 204, robots "ok"', async () => {
+  assert.strictEqual((await call('GET', '/favicon.ico')).status, 204);
+  const robots = await call('GET', '/robots.txt');
+  assert.strictEqual(robots.status, 200);
+  assert.strictEqual(robots.text, 'ok');
+  assert.strictEqual((await lastLog()).source, 'noise');
+});
+
+test('clientError: TLS bytes on the plain-HTTP port are recorded and answered 400', async () => {
+  const port = server.address().port;
+  const reply = await new Promise((resolve, reject) => {
+    const sock = net.connect(port, '127.0.0.1', () => {
+      // Start of a TLS ClientHello: 16 03 01 ...
+      sock.write(Buffer.from('160301020001000200030301aabbccddeeff00112233', 'hex'));
+    });
+    let data = '';
+    sock.on('data', (d) => { data += d.toString('latin1'); });
+    sock.on('close', () => resolve(data));
+    sock.on('error', reject);
+    setTimeout(() => sock.destroy(), 3000);
+  });
+  assert.match(reply, /^HTTP\/1\.1 400/);
+  const diag = (await call('GET', '/api/diag', { headers: ADMIN })).json;
+  const e = diag.clientErrors[0];
+  assert.ok(e, 'client error recorded');
+  assert.match(e.hex, /^1603/);
+  assert.match(e.label, /TLS handshake/);
+  assert.ok(diag.connections.length > 0, 'connections recorded');
+  assert.strictEqual((await call('GET', '/health')).text, 'ok'); // still alive
+});
+
+test('order state: browser page creates order, machine gets fail until PAID', async () => {
+  await putConfig({
+    useOrderState: true,
+    failCodes: [],
+    success: { status: 200, contentType: 'text/plain', headers: {}, body: 'PAID {{machine}} {{slot}} {{product}} {{amount}}' },
+    fail: { status: 200, contentType: 'text/plain', headers: {}, body: 'UNPAID' },
+  });
+  const page = await call('GET', '/WXdevelop/VerifyCode?mid=M77&sid=5&pid=5&pri=30.00', { headers: BROWSER });
+  assert.match(page.type, /text\/html/);
+  assert.match(page.text, /Simulate payment/);
+  const orderId = page.text.match(/data-order="([a-f0-9]+)"/)[1];
+  assert.ok(orderId.length >= 12);
+
+  assert.strictEqual((await call('GET', '/WXdevelop/VerifyCode?mid=M77&sid=5', { headers: MACHINE })).text, 'UNPAID');
+  const paid = await call('POST', `/api/pay/${orderId}`); // no admin token needed
+  assert.strictEqual(paid.json.status, 'PAID');
+  assert.strictEqual((await call('GET', '/WXdevelop/VerifyCode?mid=M77&sid=5&pid=5&pri=30.00', { headers: MACHINE })).text,
+    'PAID M77 5 5 30.00');
+  // A machine with no order falls back to the normal mode (success)
+  assert.match((await call('GET', '/v?mid=OTHER', { headers: MACHINE })).text, /^PAID OTHER/);
+
+  // Switch OFF: back to the normal behaviour even for an unpaid order
+  await call('GET', '/WXdevelop/VerifyCode?mid=M88&sid=1', { headers: BROWSER });
+  await putConfig({ useOrderState: false });
+  assert.match((await call('GET', '/v?mid=M88&sid=1', { headers: MACHINE })).text, /^PAID/);
+  assert.strictEqual((await call('POST', '/api/pay/nope')).status, 404);
+});
+
+test('no-store on /api and /admin', async () => {
+  for (const p of ['/admin', '/api/config', '/api/logs', '/api/summary']) {
+    const res = await fetch(base + p, { headers: ADMIN });
+    assert.strictEqual(res.headers.get('cache-control'), 'no-store', p);
+  }
+  assert.strictEqual((await fetch(base + '/api/logs')).headers.get('cache-control'), 'no-store');
+});
+
+test('summary endpoint and logs ?since', async () => {
+  await call('POST', '/WXdevelop/VerifyCode', { headers: MACHINE, type: 'application/json', body: '{"code":"S1"}' });
+  const s = (await call('GET', '/api/summary', { headers: ADMIN })).json;
+  assert.ok(s.counts['machine?'] >= 1);
+  assert.strictEqual(s.lastMachine.method, 'POST');
+  assert.strictEqual(s.lastMachine.ua, 'okhttp/3.12.0');
+  assert.strictEqual(s.lastMachine.body, '{"code":"S1"}');
+  assert.ok(s.last15.length >= 1 && s.last15.length <= 15);
+  assert.match(s.last15[0], /POST/);
+
+  const all = (await call('GET', '/api/logs', { headers: ADMIN })).json;
+  const ids = all.logs.map((l) => l.id);
+  assert.deepStrictEqual(ids, ids.slice().sort((a, b) => b - a)); // newest first
+  const since = (await call('GET', `/api/logs?since=${ids[1]}`, { headers: ADMIN })).json;
+  assert.deepStrictEqual(since.logs.map((l) => l.id), [ids[0]]);
+});
+
+// ---------------------------------------------------------------------------
+// Vendor protocol (FunCode 1000 / 4000 / 5000)
+// ---------------------------------------------------------------------------
+const funcall = (fields, asForm) => call('POST', '/WXdevelop/VerifyCode', {
+  headers: MACHINE,
+  type: asForm ? 'application/x-www-form-urlencoded' : 'application/json',
+  body: asForm ? new URLSearchParams(fields).toString() : JSON.stringify(fields),
+});
+
+test('protocol: FunCode 1000 loading report is acknowledged', async () => {
+  const r = await funcall({ FunCode: '1000', MachineID: 'VM1', TradeNo: 'T123', SlotNo: '22', Price: '1.5' });
+  assert.deepStrictEqual(r.json, { Status: '0', SlotNo: '22', TradeNo: 'T123', Err: 'success', ImageUrl: '', ImageDetailUrl: '' });
+});
+
+test('protocol: paid order is dispensed exactly once via FunCode 4000, then 5000 marks it delivered', async () => {
+  // Nothing paid yet: Status "1" (= do not dispense), logged as an idle poll
+  let poll = await funcall({ FunCode: '4000', MachineID: 'P1' }, true);
+  assert.strictEqual(poll.json.Status, '1');
+  assert.strictEqual((await lastLog()).idlePoll, true);
+
+  // Customer opens the QR link and pays
+  const page = await call('GET', '/WXdevelop/VerifyCode?mid=P1&sid=14&pid=14&pri=500.0', { headers: BROWSER });
+  const orderId = page.text.match(/data-order="(\d+)"/)[1];
+  assert.match(orderId, /^\d{20}$/);
+  assert.strictEqual((await funcall({ FunCode: '4000', MachineID: 'P1' })).json.Status, '1'); // still PENDING
+  await call('POST', `/api/pay/${orderId}`);
+  await call('POST', `/api/pay/${orderId}`); // paying twice must not queue a second dispense
+
+  // Another machine's poll must not take it
+  assert.strictEqual((await funcall({ FunCode: '4000', MachineID: 'OTHER' })).json.Status, '1');
+
+  poll = await funcall({ FunCode: '4000', MachineID: 'P1' });
+  assert.deepStrictEqual(poll.json, { Status: '0', MsgType: '0', TradeNo: orderId, SlotNo: '14', ProductID: '14', Err: 'success' });
+  // Next poll: nothing again (dispatched once)
+  assert.strictEqual((await funcall({ FunCode: '4000', MachineID: 'P1' })).json.Status, '1');
+
+  const fb = await funcall({ FunCode: '5000', MachineID: 'P1', PayType: 1, TradeNo: orderId, SlotNo: '14', Status: 0,
+    Time: '2026-10-13 18:00:00', Amount: '500.0', ProductID: '14', Name: 'Water' });
+  assert.deepStrictEqual(fb.json, { Status: '0', TradeNo: orderId, SlotNo: '14', Err: 'success' });
+  const order = (await call('GET', '/api/diag', { headers: ADMIN })).json.orders.find((o) => o.orderId === orderId);
+  assert.strictEqual(order.status, 'DELIVERED');
+});
+
+test('protocol: admin "Dispense now" queues a PAID order for any machine', async () => {
+  const q = await call('POST', '/api/dispense', { headers: ADMIN, body: JSON.stringify({ sid: '28' }) });
+  assert.strictEqual(q.json.status, 'PAID');
+  const poll = await funcall({ FunCode: '4000', MachineID: 'ANY1' });
+  assert.strictEqual(poll.json.Status, '0');
+  assert.strictEqual(poll.json.SlotNo, '28');
+  assert.strictEqual(poll.json.TradeNo, q.json.orderId);
+  assert.strictEqual((await call('POST', '/api/dispense', { headers: ADMIN, body: '{}' })).status, 400);
+});
+
+test('protocol switch OFF falls back to the configured response', async () => {
+  await putConfig({ protocol: false });
+  const r = await funcall({ FunCode: '4000', MachineID: 'P1' });
+  assert.strictEqual(r.json, null); // plain-text success body from the earlier test config
+  assert.match(r.text, /^PAID/);
+  await putConfig({ protocol: true });
+});
+
+test('admin "Send test" sends the chosen method and body', async () => {
+  const r = await call('POST', '/api/test', {
+    headers: ADMIN,
+    body: JSON.stringify({ method: 'POST', path: '/WXdevelop/VerifyCode', contentType: 'application/json',
+      body: '{"code":"ABC123","slotNo":"5"}' }),
+  });
+  assert.strictEqual(r.json.sentMethod, 'POST');
+  assert.strictEqual(r.json.entry.method, 'POST');
+  assert.strictEqual(r.json.entry.rawBody, '{"code":"ABC123","slotNo":"5"}');
+  assert.strictEqual(r.json.entry.detected.scanned, 'ABC123');
+  assert.strictEqual(r.json.entry.detected.slot, '5');
+  assert.strictEqual(r.json.entry.source, 'test');
 });

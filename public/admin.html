@@ -58,6 +58,23 @@
     padding: 8px 14px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; }
   #toast.show { opacity: .92; }
   #login { display: none; }
+  .check { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--text); margin-top: 10px; }
+  .check input { width: auto; }
+  .banner { border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; background: #6b7280; color: #fff; cursor: default; }
+  .banner.ok { background: var(--ok); cursor: pointer; }
+  .banner #bannerText { font-weight: 700; }
+  .banner .counts { font-size: 12px; opacity: .9; margin-top: 4px; }
+  .src { font-size: 11px; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--line); color: var(--muted); }
+  .src.machine { border-color: var(--ok); color: var(--ok); font-weight: 700; }
+  .log.flash { background: rgba(22,163,74,.12); }
+  h3.sub { font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  .diag { font-family: ui-monospace, Consolas, monospace; font-size: 12px; border-top: 1px solid var(--line); padding: 5px 0; overflow-wrap: anywhere; }
+  .diag .tls { color: var(--bad); font-weight: 700; }
+  .scrollx { overflow-x: auto; }
+  table.orders { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.orders th, table.orders td { text-align: left; padding: 6px 4px; border-top: 1px solid var(--line); white-space: nowrap; }
+  table.orders button { padding: 5px 9px; font-size: 12px; }
+  .paid { color: var(--ok); font-weight: 700; } .failed { color: var(--bad); font-weight: 700; } .pending { color: #d97706; font-weight: 700; }
 </style>
 </head>
 <body>
@@ -72,6 +89,12 @@
   </section>
 
   <div id="app" hidden>
+    <!-- Banner: has the machine itself ever called us? -->
+    <section class="banner" id="banner">
+      <div id="bannerText">No machine-like request yet</div>
+      <div class="counts" id="bannerCounts"></div>
+    </section>
+
     <!-- Mode toggle -->
     <section class="card">
       <div class="toggle">
@@ -79,6 +102,10 @@
         <button id="btnFail" class="fail">FAIL</button>
       </div>
       <p class="muted" id="modeText" style="margin:8px 0 0"></p>
+      <label class="check"><input type="checkbox" id="useOrderState">
+        Use order state (machine gets SUCCESS only when the latest order for its mid/sid is PAID)</label>
+      <label class="check"><input type="checkbox" id="protocol">
+        Vendor protocol: answer FunCode 1000 / 4000 / 5000 with the protocol JSON (recommended)</label>
     </section>
 
     <!-- Response editors -->
@@ -99,7 +126,7 @@
         <div><label for="failCodes">Fail codes (comma separated)</label><input id="failCodes" placeholder="FAIL001, BAD123"></div>
       </div>
       <p class="muted">Scanning a fail code always gets the fail response. Placeholders: {{scanned}} {{slot}} {{machine}}
-        {{timestamp}} {{timestampMs}} {{iso}} {{method}} {{path}} {{query.KEY}} {{body.KEY}}</p>
+        {{product}} {{amount}} {{timestamp}} {{timestampMs}} {{iso}} {{method}} {{path}} {{query.KEY}} {{body.KEY}}</p>
       <div class="row"><button id="save">Save</button><button class="ghost" id="reload">Reload from server</button></div>
     </section>
 
@@ -130,8 +157,38 @@
         <button class="ghost" id="copyLast">Copy last request</button>
         <button class="ghost" id="clearLogs">Clear logs</button>
       </div>
+      <label class="check"><input type="checkbox" id="showNoise"> Show noise (favicon / robots)</label>
+      <label class="check"><input type="checkbox" id="showIdle"> Show idle polls (FunCode 4000 with nothing to dispense)</label>
       <p class="muted" id="pollStatus"></p>
       <div id="logs"></div>
+    </section>
+
+    <!-- Orders created by the customer test page -->
+    <section class="card">
+      <h2>Orders <span class="muted" id="orderCount"></span></h2>
+      <p class="muted">A PAID order is sent to the machine ONCE, in the reply to its next FunCode 4000 poll
+        (status becomes DISPATCHED), then the machine reports DELIVERED / DELIVERY_FAILED (FunCode 5000).</p>
+      <div class="row">
+        <div><label for="dMid">MachineID (empty = any)</label><input id="dMid" placeholder="2610070145"></div>
+        <div style="flex:0 1 90px"><label for="dSid">Slot</label><input id="dSid" placeholder="5"></div>
+        <div style="flex:0 1 90px"><label for="dPid">Product ID</label><input id="dPid" placeholder="= slot"></div>
+      </div>
+      <div class="row" style="margin:8px 0"><button id="dispense">Dispense now (queue a PAID order)</button></div>
+      <div id="orders" class="scrollx"></div>
+    </section>
+
+    <!-- Raw TCP connections and broken / non-HTTP requests -->
+    <section class="card">
+      <div class="row" style="align-items:center">
+        <h2 style="margin:0">Connections / errors</h2>
+        <button class="ghost" id="clearDiag">Clear</button>
+      </div>
+      <p class="muted">Every TCP connection to this server, even ones that never sent valid HTTP.
+        A "TLS handshake" error means the machine uses https:// for this address.</p>
+      <h3 class="sub">Client errors</h3>
+      <div id="clientErrors"></div>
+      <h3 class="sub">Connections</h3>
+      <div id="connections"></div>
     </section>
   </div>
 </main>
@@ -212,6 +269,10 @@ const PRESETS = [
   { name: 'Plain "OK"', type: T, ok: 'OK', fail: 'FAIL' },
   { name: 'Plain "1"', type: T, ok: '1', fail: '0' },
   { name: '{"errcode":0,"errmsg":"ok"}', type: J, ok: '{"errcode":0,"errmsg":"ok"}', fail: '{"errcode":1,"errmsg":"fail"}' },
+  { name: 'Paid JSON (mid/sid/orderNo/amount)', type: J,
+    ok: '{"code":0,"msg":"success","data":{"mid":"{{query.mid}}","sid":"{{query.sid}}","orderNo":"T{{timestampMs}}","status":"PAID","amount":"{{query.pri}}"}}',
+    fail: '{"code":1,"msg":"fail","data":{"mid":"{{query.mid}}","sid":"{{query.sid}}","orderNo":"","status":"UNPAID","amount":"{{query.pri}}"}}' },
+  { name: 'Paid plain "1"', type: T, ok: '1', fail: '0' },
   { name: 'XML return_code', type: X, ok: '<xml><return_code>SUCCESS</return_code></xml>',
     fail: '<xml><return_code>FAIL</return_code><return_msg>fail</return_msg></xml>' },
 ];
@@ -267,6 +328,8 @@ function fillEditors(cfg) {
   }
   $('delayMs').value = cfg.delayMs;
   $('failCodes').value = (cfg.failCodes || []).join(', ');
+  $('useOrderState').checked = Boolean(cfg.useOrderState);
+  $('protocol').checked = cfg.protocol !== false;
   showMode(cfg.mode);
 }
 
@@ -338,7 +401,9 @@ $('tRun').onclick = async () => {
     });
     $('tOut').hidden = false;
     $('tOut').textContent = r.error ? 'Error: ' + r.error
-      : `HTTP ${r.status}\nContent-Type: ${r.headers['content-type'] || ''}\n\n${r.body}`;
+      : `Sent ${r.sentMethod} -> HTTP ${r.status}\nContent-Type: ${r.headers['content-type'] || ''}\n\n${r.body}` +
+        (r.entry ? `\n\n--- Server logged #${r.entry.id} ---\nmethod: ${r.entry.method}\nbody: ${r.entry.rawBody || '(empty)'}\n` +
+          `scanned: ${r.entry.detected.scanned || '-'}  slot: ${r.entry.detected.slot || '-'}  machine: ${r.entry.detected.machine || '-'}` : '');
     pollLogs();
   } catch (e) { toast(e.message); }
 };
@@ -362,8 +427,9 @@ function logToText(l) {
   return [
     `=== Request #${l.id} at ${l.time} ===`,
     `${l.method} ${l.url}`,
-    `Client IP: ${l.ip}`,
-    `Detected: scanned=${l.detected.scanned || '-'} slot=${l.detected.slot || '-'} machine=${l.detected.machine || '-'}`,
+    `Client IP: ${l.ip}   Source: ${l.source || '-'}`,
+    `Detected: scanned=${l.detected.scanned || '-'} slot=${l.detected.slot || '-'} machine=${l.detected.machine || '-'}` +
+      ` product=${l.detected.product || '-'} amount=${l.detected.amount || '-'}`,
     '', '--- Headers ---', Object.entries(l.headers || {}).map(([k, v]) => `${k}: ${v}`).join('\n'),
     '', '--- Query ---', pretty(Object.keys(l.query || {}).length ? l.query : ''),
     '', '--- Raw body ---', pretty(l.rawBody),
@@ -375,19 +441,23 @@ function logToText(l) {
   ].join('\n');
 }
 
+function visibleLogs() {
+  return logs.filter((l) => ($('showNoise').checked || l.source !== 'noise') && ($('showIdle').checked || !l.idlePoll));
+}
 function renderLogs() {
-  $('logCount').textContent = `(${logs.length})`;
-  $('logs').innerHTML = logs.length ? logs.map((l) => {
+  const shown = visibleLogs();
+  $('logCount').textContent = `(${shown.length})`;
+  $('logs').innerHTML = shown.length ? shown.map((l) => {
     const r = l.response || {};
     const d = l.detected || {};
     const time = new Date(l.time).toLocaleTimeString();
     return `<div class="log" data-id="${l.id}">
       <div class="log-head">
         <span class="badge ${esc(r.mode)}">${esc(r.status)}</span>
-        <span class="path">${esc(l.method)} ${esc(l.path)}</span>
+        <span class="path">${esc(l.method)} ${esc(l.path)} <span class="src ${l.source === 'machine?' ? 'machine' : ''}">${esc(l.source || '?')}</span></span>
         <span class="muted">${esc(time)}</span>
-        <div class="meta">scanned: <b>${esc(d.scanned || '-')}</b> · slot: <b>${esc(d.slot || '-')}</b>
-          ${d.machine ? ' · machine: <b>' + esc(d.machine) + '</b>' : ''} · ${esc(r.mode)}${r.reason === 'failCode' ? ' (fail code)' : ''}</div>
+        <div class="meta">machine: <b>${esc(d.machine || '-')}</b> · slot: <b>${esc(d.slot || '-')}</b> · amount: <b>${esc(d.amount || '-')}</b>
+          ${d.scanned ? ' · scanned: <b>' + esc(d.scanned) + '</b>' : ''} · ${esc(r.mode)}${r.reason && r.reason !== 'config' ? ' (' + esc(r.reason) + ')' : ''}</div>
       </div>
       ${openIds.has(l.id) ? `<div class="detail">
         <div class="row" style="margin-top:8px"><button class="ghost" data-copy="${l.id}">Copy as text</button></div>
@@ -424,7 +494,8 @@ async function pollLogs() {
       return pollLogs();
     }
     if (data.logs.length) {
-      logs = data.logs.concat(logs).slice(0, 500);
+      const seen = new Set(logs.map((l) => l.id));
+      logs = data.logs.filter((l) => !seen.has(l.id)).concat(logs).sort((a, b) => b.id - a.id).slice(0, 500);
       renderLogs();
     }
     lastId = data.lastId;
@@ -439,7 +510,97 @@ $('clearLogs').onclick = async () => {
   try { await api('DELETE', '/logs'); logs = []; openIds.clear(); renderLogs(); toast('Logs cleared'); }
   catch (e) { toast(e.message); }
 };
-$('copyLast').onclick = () => logs[0] ? copyText(logToText(logs[0])) : toast('No requests yet');
+$('copyLast').onclick = () => visibleLogs()[0] ? copyText(logToText(visibleLogs()[0])) : toast('No requests yet');
+$('showNoise').checked = storageGet('showNoise') === '1';
+$('showNoise').onchange = () => { storageSet('showNoise', $('showNoise').checked ? '1' : '0'); renderLogs(); };
+
+// ---------------------------------------------------------------------------
+// Banner (summary), orders, connections / errors
+// ---------------------------------------------------------------------------
+let lastMachineId = 0;
+function ago(iso) {
+  const s = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  return s < 60 ? s + ' s ago' : s < 3600 ? Math.round(s / 60) + ' min ago' : Math.round(s / 3600) + ' h ago';
+}
+async function pollSummary() {
+  try {
+    const s = await api('GET', '/summary');
+    const m = s.lastMachine;
+    lastMachineId = m ? m.id : 0;
+    $('banner').classList.toggle('ok', Boolean(m));
+    $('bannerText').textContent = m
+      ? `Machine-like request received ${ago(m.time)}: ${m.method} ${m.url} (tap to open)`
+      : 'No machine-like request yet';
+    const c = s.counts || {};
+    $('bannerCounts').textContent = ['machine?', 'browser', 'bot', 'test', 'noise']
+      .map((k) => `${k}: ${c[k] || 0}`).join(' · ') +
+      ` · TCP connections: ${s.connections} · client errors: ${s.clientErrors}`;
+  } catch { /* shown by pollLogs */ }
+}
+$('banner').onclick = () => {
+  if (!lastMachineId) return;
+  openIds.add(lastMachineId);
+  renderLogs();
+  const el = document.querySelector(`.log[data-id="${lastMachineId}"]`);
+  if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('flash'); }
+};
+
+async function pollDiag() {
+  try {
+    const d = await api('GET', '/diag');
+    $('useOrderState').checked = d.useOrderState;
+    $('protocol').checked = d.protocol !== false;
+    $('orderCount').textContent = `(${d.orders.length})`;
+    $('orders').innerHTML = d.orders.length
+      ? '<table class="orders"><tr><th>Status</th><th>TradeNo</th><th>mid</th><th>sid</th><th>Amount</th><th>Time</th><th></th></tr>' +
+        d.orders.map((o) => `<tr><td class="${o.status === 'PENDING' ? 'pending' : o.status === 'DELIVERY_FAILED' ? 'failed' : 'paid'}">${esc(o.status)}</td>
+          <td>${esc(o.orderId)}</td><td>${esc(o.mid || 'any')}</td><td>${esc(o.sid)}</td><td>${esc(o.amount)}</td>
+          <td>${esc(new Date(o.createdAt).toLocaleTimeString())}</td>
+          <td>${o.status !== 'PENDING' ? '' : `<button data-pay="${esc(o.orderId)}">Mark PAID</button>`}</td></tr>`).join('') + '</table>'
+      : '<p class="muted">No orders yet. Open the machine QR link in a phone browser to create one.</p>';
+    $('clientErrors').innerHTML = d.clientErrors.length ? d.clientErrors.map((e) =>
+      `<div class="diag">${esc(new Date(e.time).toLocaleTimeString())} ${esc(e.remote)} <b>${esc(e.code)}</b>
+        ${e.label ? '<div class="tls">' + esc(e.label) + '</div>' : ''}<div>hex: ${esc(e.hex || '-')}</div></div>`).join('')
+      : '<p class="muted">None</p>';
+    $('connections').innerHTML = d.connections.length ? d.connections.map((c) =>
+      `<div class="diag">#${c.id} ${esc(new Date(c.time).toLocaleTimeString())} ${esc(c.remote)} -> port ${esc(c.localPort)}</div>`).join('')
+      : '<p class="muted">None</p>';
+  } catch { /* shown by pollLogs */ }
+}
+$('orders').onclick = async (e) => {
+  const b = e.target.closest('[data-pay]');
+  if (!b) return;
+  try {
+    const r = await fetch('/api/pay/' + encodeURIComponent(b.dataset.pay), { method: 'POST' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    toast('Marked PAID');
+    pollDiag();
+  } catch (err) { toast(err.message); }
+};
+$('protocol').onchange = async () => {
+  try {
+    const c = await api('PUT', '/config', { protocol: $('protocol').checked });
+    toast('Vendor protocol: ' + (c.protocol ? 'ON' : 'OFF'));
+  } catch (e) { toast(e.message); }
+};
+$('showIdle').checked = storageGet('showIdle') === '1';
+$('showIdle').onchange = () => { storageSet('showIdle', $('showIdle').checked ? '1' : '0'); renderLogs(); };
+$('dispense').onclick = async () => {
+  try {
+    const o = await api('POST', '/dispense', { mid: $('dMid').value, sid: $('dSid').value, pid: $('dPid').value });
+    toast('Queued order ' + o.orderId + ' for slot ' + o.sid);
+    pollDiag();
+  } catch (e) { toast(e.message); }
+};
+$('useOrderState').onchange = async () => {
+  try {
+    const c = await api('PUT', '/config', { useOrderState: $('useOrderState').checked });
+    toast('Use order state: ' + (c.useOrderState ? 'ON' : 'OFF'));
+  } catch (e) { toast(e.message); }
+};
+$('clearDiag').onclick = async () => {
+  try { await api('DELETE', '/diag'); pollDiag(); toast('Cleared'); } catch (e) { toast(e.message); }
+};
 
 /** Copy text; falls back to a hidden textarea where the Clipboard API is unavailable. */
 async function copyText(text) {
@@ -468,9 +629,10 @@ async function boot() {
   } catch { return; }
   $('app').hidden = false;
   renderLogs();
-  pollLogs();
+  const tick = () => { pollLogs(); pollSummary(); pollDiag(); };
+  tick();
   clearInterval(pollTimer);
-  pollTimer = setInterval(pollLogs, 2000);
+  pollTimer = setInterval(tick, 2000);
 }
 boot();
 </script>
